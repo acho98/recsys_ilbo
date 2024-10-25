@@ -134,7 +134,7 @@ def process_dataframe(df, category, prompt, api_key, api_gw_key):
             })
 
             print(f"Success: docid {row['docid']} in {category} 처리 완료")
-            time.sleep(5)  # 각 요청 간 지연 시간
+            time.sleep(5)
 
         except Exception as e:
             errors.append({
@@ -151,7 +151,7 @@ def process_dataframe(df, category, prompt, api_key, api_gw_key):
 
     return result_df, errors_df
 
-def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, max_retries=3):
+def retry_failed_rows(errors_df, df, result_df, api_key, apigw_api_key, max_retries=3):
     retry_count = 0
     retry_wait_time = 6
 
@@ -200,7 +200,7 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
                     {"role": "user", "content": context},
                 ]
 
-                response_json, error = call_clova_api(api_key, api_gw_key, messages)
+                response_json, error = call_clova_api(api_key, apigw_api_key, messages)
 
                 if error:
                     if '429' in error:
@@ -243,6 +243,7 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
 
                 pred, prob = process_response_content(result_content)
 
+                # 성공 시 결과를 result_df에 추가 (docid 순서 유지)
                 result_data = {
                     "docid": row['docid'],
                     "category": row['category'],
@@ -255,8 +256,9 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
                     "prob": prob
                 }
 
+                # 적절한 위치에 삽입
                 original_index = result_df[result_df['docid'] < row['docid']].index.max() + 1
-                if pd.isna(original_index):
+                if pd.isna(original_index):  # 첫 번째 위치에 삽입하는 경우
                     original_index = 0
 
                 result_df = pd.concat([
