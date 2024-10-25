@@ -7,12 +7,12 @@ import json
 import re, time
 import matplotlib.pyplot as plt
 
-def calculate_token_count(messages, api_key, apigw_api_key):
+def calculate_token_count(messages, api_key, api_gw_key):
     url = f'https://clovastudio.apigw.ntruss.com/v1/api-tools/chat-tokenize/HCX-003'
 
     headers = {
         'X-NCP-CLOVASTUDIO-API-KEY': api_key,
-        'X-NCP-APIGW-API-KEY': apigw_api_key,
+        'X-NCP-APIGW-API-KEY': api_gw_key,
         'Content-Type': 'application/json'
     }
 
@@ -34,12 +34,12 @@ def calculate_token_count(messages, api_key, apigw_api_key):
     else:
         return None
     
-def call_clova_api(api_key, apigw_api_key, messages):
+def call_clova_api(api_key, api_gw_key, messages):
     url = 'https://clovastudio.stream.ntruss.com/testapp/v1/chat-completions/HCX-003'
 
     headers = {
         'X-NCP-CLOVASTUDIO-API-KEY': api_key,
-        'X-NCP-APIGW-API-KEY': apigw_api_key,
+        'X-NCP-APIGW-API-KEY': api_gw_key,
         'Content-Type': 'application/json',
     }
 
@@ -87,7 +87,7 @@ def process_response_content(result_content):
     except json.JSONDecodeError:
         raise ValueError("Unexpected content format: Not a valid JSON")
 
-def process_dataframe(df, category, prompt, api_key, apigw_api_key):
+def process_dataframe(df, category, prompt, api_key, api_gw_key):
     df_filtered = df[df['category'] == category]
 
     results = []
@@ -106,7 +106,7 @@ def process_dataframe(df, category, prompt, api_key, apigw_api_key):
                 {"role": "user", "content": context},
             ]
 
-            response_json, error = call_clova_api(api_key, apigw_api_key, messages)
+            response_json, error = call_clova_api(api_key, api_gw_key, messages)
 
             if error:
                 raise Exception(error)
@@ -151,7 +151,7 @@ def process_dataframe(df, category, prompt, api_key, apigw_api_key):
 
     return result_df, errors_df
 
-def retry_failed_rows(errors_df, df, result_df, prompts, api_key, apigw_api_key, max_retries=3):
+def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, max_retries=3):
     retry_count = 0
     retry_wait_time = 6
 
@@ -200,7 +200,7 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, apigw_api_key,
                     {"role": "user", "content": context},
                 ]
 
-                response_json, error = call_clova_api(api_key, apigw_api_key, messages)
+                response_json, error = call_clova_api(api_key, api_gw_key, messages)
 
                 if error:
                     if '429' in error:
