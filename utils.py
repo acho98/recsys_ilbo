@@ -108,19 +108,43 @@ def call_clova_api(api_key, api_gw_key, messages):
     
 def process_response_content(result_content):
     """
-    LLM 응답 형식이 JSON 포멧인지 확인 및 처리.
+    JSON 구조화 함수
     """
     try:
         parsed_content = json.loads(result_content)
-        pred = parsed_content.get("분류", "")
-        prob = parsed_content.get("확률", "")
-        return pred, prob
     except json.JSONDecodeError:
-        raise ValueError("Unexpected content format: Not a valid JSON")
+        def fix_reason_field(s):
+            pattern = r'("근거"\s*:\s*)(.*?)(\s*[\n\r]*\s*})'
+            match = re.search(pattern, s, re.DOTALL)
+            if match:
+                key = match.group(1)  
+                value = match.group(2).strip() 
+                end = match.group(3)   
 
-def process_dataframe(df, category, prompt, api_key, api_gw_key):
+                if not (value.startswith('"') and value.endswith('"')):
+                    value = value.replace('"', '\\"')
+                    value = f'"{value}"'
+
+                return s[:match.start(1)] + key + value + end
+            else:
+                return s
+
+        fixed_content = fix_reason_field(result_content)
+
+        try:
+            parsed_content = json.loads(fixed_content)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON 파싱 실패: {str(e)}")
+
+    pred = parsed_content.get("분류", "")
+    score = parsed_content.get("점수", "")
+    reason = parsed_content.get("근거", "")
+
+    return pred, score, reason
+
+def process_dataframe(df, category, prompt, api_key, apigw_api_key):
     """
-    배치 처리를 위한 데이터 처리 함수:
+        배치 처리를 위한 데이터 처리 함수:
 
     파라미터:
         df: 처리할 데이터 프레임
@@ -178,15 +202,15 @@ def process_dataframe(df, category, prompt, api_key, api_gw_key):
             context = row['content']
             len_context = row['len_context']
 
-            if len_context > 7000:
-                context = context[-4500:]
+            if len_context > 6000:
+                context = context[:6000]
 
             messages = [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": context},
             ]
 
-            response_json, error = call_clova_api(api_key, api_gw_key, messages)
+            response_json, error = call_clova_api(api_key, apigw_api_key, messages)
 
             if error:
                 raise Exception(error)
@@ -197,34 +221,34 @@ def process_dataframe(df, category, prompt, api_key, api_gw_key):
             result_content = response_json['result']['message'].get('content', '')
 
             try:
-                pred, prob = process_response_content(result_content)
+                pred, score, reason = process_response_content(result_content)
             except ValueError as ve:
-                raise Exception(f"Failed to process content for docid {row['docid']} in {category} - {str(ve)}")
+                raise Exception(f"Failed to process content for docid {row['id']} in {category} - {str(ve)}")
 
             results.append({
-                "docid": row['docid'],
+                "docid": row['id'],
                 "category": category,
                 "title": row['title'],
-                "link": row['link'],
+                "link": row['web_link'],
                 "content": row['content'],
                 "len_content": len_context,
                 "label": row['label'],
                 "pred": pred,
-                "prob": prob
+                "score": score,
+                "reason": reason
             })
-
-            print(f"Success: docid {row['docid']} in {category} 처리 완료")
-            time.sleep(5)
+            print(f"Success: docid {row['id']} in {category} 처리 완료")
+            time.sleep(2)  
 
         except Exception as e:
             errors.append({
-                "docid": row['docid'],
+                "docid": row['id'],
                 "category": category,
                 "errors": str(e),
                 "time": datetime.now().strftime('%Y%m%d %H:%M:%S')
             })
 
-            print(f"Error: docid {row['docid']} in {category} 처리 실패 - {str(e)}")
+            print(f"Error: docid {row['id']} in {category} 처리 실패 - {str(e)}")
 
     result_df = pd.DataFrame(results)
     errors_df = pd.DataFrame(errors)
@@ -270,7 +294,7 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
         print(f"Retry processing complete. Results saved as {final_result_filename}, {final_errors_filename}, and {retry_logs_filename}.")
     """
     retry_count = 0
-    retry_wait_time = 6
+    retry_wait_time = 2
 
     all_logs = []
 
@@ -283,8 +307,7 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
 
         for _, error_row in tqdm(errors_df.iterrows(), total=len(errors_df), desc=f"Retrying attempt {retry_count}"):
             try:
-                # 원본 df에서 해당 행 찾기
-                matching_rows = df[(df['docid'] == error_row['docid']) & (df['category'] == error_row['category'])]
+                matching_rows = df[(df['id'] == error_row['docid']) & (df['category'] == error_row['category'])]
 
                 if matching_rows.empty:
                     log_message = f"No matching row found for docid {error_row['docid']} and category {error_row['category']}"
@@ -310,8 +333,8 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
                 context = row['content']
                 len_context = row['len_context']
 
-                if len_context > 7000:
-                    context = context[-5000:]
+                if len_context > 6000:
+                    context = context[:6000]
 
                 messages = [
                     {"role": "system", "content": prompts[row['category']]},
@@ -359,25 +382,21 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
                 if not isinstance(result_content, str):
                     raise Exception("Unexpected content format")
 
-                # 응답 내용을 처리하여 summary, pred, reason 추출
-                pred, prob = process_response_content(result_content)
-
-                # 성공 시 결과를 result_df에 추가 (docid 순서 유지)
+                pred, score, reason = process_response_content(result_content)
                 result_data = {
-                    "docid": row['docid'],
+                    "docid": row['id'],
                     "category": row['category'],
                     "title": row['title'],
-                    "link": row['link'],
+                    "link": row['web_link'],
                     "content": row['content'],
                     "len_content": len_context,
                     "label": row['label'],
                     "pred": pred,
-                    "prob": prob
+                    "score": score,
+                    "reason": reason
                 }
-
-                # 적절한 위치에 삽입
-                original_index = result_df[result_df['docid'] < row['docid']].index.max() + 1
-                if pd.isna(original_index):  # 첫 번째 위치에 삽입하는 경우
+                original_index = result_df[result_df['docid'] < row['id']].index.max() + 1
+                if pd.isna(original_index): 
                     original_index = 0
 
                 result_df = pd.concat([
@@ -386,10 +405,10 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
                     result_df.iloc[original_index:]   # 해당 위치 이후의 데이터
                 ]).reset_index(drop=True)
 
-                log_message = f"Success on retry: docid {row['docid']} in {row['category']} 처리 완료"
+                log_message = f"Success on retry: docid {row['id']} in {row['category']} 처리 완료"
                 print(log_message)
                 current_attempt_logs.append({
-                    "docid": row['docid'],
+                    "docid": row['id'],
                     "category": row['category'],
                     "status": "Success",
                     "error_stage": "Retry",
@@ -418,64 +437,39 @@ def retry_failed_rows(errors_df, df, result_df, prompts, api_key, api_gw_key, ma
 
             time.sleep(retry_wait_time)
 
-        # 현재 시도에서의 로그를 전체 로그에 추가
         all_logs.extend(current_attempt_logs)
-
-        # 새로운 오류로 errors_df 갱신
         errors_df = pd.DataFrame(new_errors).reset_index(drop=True)
 
-    # 전체 로그를 데이터프레임으로 변환하여 반환
     logs_df = pd.DataFrame(all_logs)
 
     return result_df, errors_df, logs_df
 
-def process_single_row(row, prompt, api_key, api_gw_key):
-    """
-    싱글 로우 처리 테스트 함수:
-
-    사용 예시:
-        single_row = df.iloc[122]
-        process_single_row(single_row, api_key, api_gw_key)
-    """
+def process_single_row(row, prompt, api_key, apigw_api_key):
     try:
         context = row['content']
         len_context = row['len_context']
 
-        # len_context 절삭
-        if len_context > 7000:
-            context = context[-5000:]
+        if len_context > 6000:
+            context = context[:6000]
 
         messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": context},
         ]
 
-        # API 호출
-        response_json, error = call_clova_api(api_key, api_gw_key, messages)
+        response_json, error = call_clova_api(api_key, apigw_api_key, messages)
 
         if error:
             raise Exception(error)
-
-        # 응답 전체를 출력해 구조 확인 (디버깅 목적)
-        print(f"Full response for docid {row['docid']}: {response_json}")
-
-        # result와 message 필드가 예상대로 있는지 확인
         if 'result' not in response_json or 'message' not in response_json['result']:
             raise Exception("Unexpected response format: 'result' or 'message' key missing")
 
         result_content = response_json['result']['message'].get('content', '')
+        # print(result_content)
 
-        # JSON 형식인지 텍스트 형식인지 확인
-        if result_content.startswith('{') and result_content.endswith('}'):
-            # JSON 포맷으로 처리
-            parsed_content = json.loads(result_content)
-            pred = parsed_content.get("분류", "")
-            prob = parsed_content.get("확률", "")
-        else:
-            pass
+        pred, score, reason = process_response_content(result_content)
 
-        print(f"Prediction: {pred}")
-        print(f"Prob: {prob}")
+        return pred, score, reason
 
     except Exception as e:
-        print(f"Error: docid {row['docid']} 처리 실패 - {str(e)}")
+        print(f"Error: docid {row['id']} 처리 실패 - {str(e)}")
