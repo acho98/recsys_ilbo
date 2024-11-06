@@ -76,7 +76,7 @@ def call_clova_api(api_key, api_gw_key, messages):
     data = {
         "topK": 0,
         "includeAiFilters": True,
-        "maxTokens": 100,
+        "maxTokens": 300,
         "temperature": 0.25,
         "messages": messages,
         "repeatPenalty": 4,
